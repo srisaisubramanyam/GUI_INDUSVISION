@@ -1,0 +1,21 @@
+{
+  "defectToggles": {
+    "items": []
+  },
+  "python": {
+    "exe": "python"
+  },
+  "code": {
+    "lines": {
+      "Line A": []
+    }
+  },
+  "camera": {
+    "frames": []
+  },
+  "dataCollection": {
+    "enabled": true,
+    "outputDir": "C:\\data\\collection",
+    "items": []
+  }
+}

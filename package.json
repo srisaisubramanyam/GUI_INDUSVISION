@@ -1,0 +1,50 @@
+{
+  "name": "gui_hul",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite build && node electron/start.cjs",
+    "build": "vite build",
+    "preview": "node electron/start.cjs",
+    "dist": "vite build && electron-builder"
+  },
+  "dependencies": {
+    "lucide-react": "^0.563.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.13.0",
+    "react-toastify": "^11.0.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.1",
+    "autoprefixer": "^10.4.24",
+    "concurrently": "^8.2.2",
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.5.0",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.19",
+    "vite": "^7.3.1",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.hul.gui",
+    "productName": "GUI_HUL",
+    "files": [
+      "dist/**",
+      "electron/**"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
+  }
+}

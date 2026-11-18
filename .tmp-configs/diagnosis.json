@@ -1,0 +1,15 @@
+{
+  "plc": {
+    "ipAddress": "0.0.0.0"
+  },
+  "click_status": {
+    "ping": "non-triggered",
+    "rejection": "non-triggered",
+    "heartbeat": "non-triggered"
+  },
+  "response_status": {
+    "ping": "NOK",
+    "rejection": "NOK",
+    "heartbeat": "NOK"
+  }
+}

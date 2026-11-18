@@ -1,0 +1,94 @@
+{
+  "defectToggles": {
+    "items": [
+      {
+        "id": "def_1771321869026",
+        "name": "dent",
+        "enabled": true
+      },
+      {
+        "id": "def_1771322088890",
+        "name": "Crack",
+        "enabled": true
+      },
+      {
+        "id": "def_1776332424136",
+        "name": "scratch",
+        "enabled": true
+      }
+    ]
+  },
+  "python": {
+    "exe": "python"
+  },
+  "code": {
+    "lines": {
+      "Line 1": [
+        {
+          "label": "Japan-80gm",
+          "scriptPath": "C:/Users/Rupesh/dummypythonfiles/infinite_counter.py",
+          "ocrConfig": {
+            "camera_serial_number": 54003520047,
+            "default_conf": 0.2,
+            "iou_thersh": 0.5,
+            "ocr_count": 0.9,
+            "start_offset": 1,
+            "recipe_start_offset": 0.1,
+            "ocr_weights": 0
+          }
+        },
+        {
+          "label": "singapore-100ml",
+          "scriptPath": "C:/Users/Rupesh/dummypythonfiles/infinite_counter.py",
+          "ocrConfig": {
+            "camera_serial_number": 54003520047,
+            "default_conf": 0.2,
+            "iou_thersh": 0.5,
+            "ocr_count": 0.9,
+            "start_offset": 1,
+            "recipe_start_offset": 0.1,
+            "ocr_weights": 0
+          }
+        }
+      ],
+      "Line 2": [
+        {
+          "label": "Japan-100ml",
+          "scriptPath": "C:/Users/Rupesh/dummypythonfiles/infinite_counter.py",
+          "ocrConfig": {
+            "camera_serial_number": 54003520047,
+            "default_conf": 0.2,
+            "iou_thersh": 0.5,
+            "ocr_count": 0.9,
+            "start_offset": 1,
+            "recipe_start_offset": 0.1,
+            "ocr_weights": 0
+          }
+        }
+      ]
+    }
+  },
+  "camera": {
+    "frames": []
+  },
+  "dataCollection": {
+    "enabled": true,
+    "outputDir": "C:\\data\\collection",
+    "items": [
+      {
+        "id": "dc_1771322076797",
+        "name": "Dent",
+        "enabled": true
+      }
+    ]
+  },
+  "ocrconfigs": {
+    "camera_serial_number": 54003520047,
+    "default_conf": 0.2,
+    "iou_thersh": 0.5,
+    "ocr_count": 0.9,
+    "start_offset": 1,
+    "recipe_start_offset": 0.1,
+    "ocr_weights": 0
+  }
+}
