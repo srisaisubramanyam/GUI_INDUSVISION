@@ -27,7 +27,7 @@ const DEFAULT_STOP_COOLDOWN_MS = 20 * 1000;
 const PLC_STATUS_POLL_MS = 3000;
 const PLC_RESULT_DISPLAY_MS = 2000;
 // bridge states that mean "pressing now cannot work", reported as info rather than error
-const PLC_UNAVAILABLE_STATES = ["disabled", "starting", "not_running"];
+const PLC_UNAVAILABLE_STATES = ["disabled", "offline", "starting", "not_running"];
 const createEmptyOcrGroup = (name = "") => ({
   name,
   fields: [{ key: "", value: "" }]
@@ -150,7 +150,8 @@ export default function Code() {
   const [lineCooldowns, setLineCooldowns] = useState({});
   const [stopCooldownMs, setStopCooldownMs] = useState(DEFAULT_STOP_COOLDOWN_MS);
   const [countdownNow, setCountdownNow] = useState(Date.now());
-  // per line: bridge state from STATUS polling (ready | disabled | starting | not_running | timeout | error)
+  // per line: bridge state from STATUS polling
+  // (ready | disabled | offline | starting | not_running | timeout | error)
   const [plcStatus, setPlcStatus] = useState({});
   // per line: in-flight / last result of a Send Signal press (sending | sent | failed)
   const [plcAction, setPlcAction] = useState({});
@@ -444,6 +445,14 @@ export default function Code() {
     const status = plcStatus[lineKey];
     if (status === "disabled") {
       return { ...idle, text: "PLC disabled", disabled: true, title: "enable_plc is false for the running SKU" };
+    }
+    if (status === "offline") {
+      return {
+        icon: <CircleX size={16} />,
+        text: "PLC offline",
+        disabled: true,
+        title: "The SKU script cannot reach the PLC. The button re-enables once it reconnects."
+      };
     }
     if (!status || status === "starting" || status === "not_running") {
       return {
