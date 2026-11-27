@@ -23,14 +23,28 @@ const lineCooldownTimeouts = new Map();
 const STOP_COOLDOWN_MS = 20 * 1000;
 
 // ---- PLC bridge -----------------------------------------------------------
-// The running SKU script (OCR child process) listens on 127.0.0.1:<port> and
-// answers one-line commands: STATUS -> READY|DISABLED|NOT_CONNECTED,
-// SEND_SIGNAL -> OK|DISABLED|NOT_CONNECTED|ERR <msg>.
+// The running SKU script (OCR child process) listens on 127.0.0.1:<port>.
+// Each request is one line, each reply one line of JSON:
+//   STATUS            -> {"plc": "ready"|"disabled"|"not_connected",
+//                         "single_defect": bool, "consecutive": n, "default": n}
+//   SINGLE_DEFECT ON  -> {"ok": true, "single_defect": true,  "consecutive": 1}
+//   SINGLE_DEFECT OFF -> {"ok": true, "single_defect": false, "consecutive": <default>}
+//   (failures)        -> {"ok": false, "error": "<message>"}
 // The port is handed to the script via the PLC_BRIDGE_PORT env var at launch.
 const PLC_BRIDGE_BASE_PORT = 5000;
 const PLC_STATUS_TIMEOUT_MS = 2000;
-const PLC_SEND_TIMEOUT_MS = 8000;
+const PLC_SET_TIMEOUT_MS = 5000;
 const plcBusyLines = new Set();
+const PLC_STATE_BY_BRIDGE = { ready: "ready", disabled: "disabled", not_connected: "offline" };
+
+function parseBridgeReply(reply) {
+  try {
+    const data = JSON.parse(reply);
+    return data && typeof data === "object" ? data : null;
+  } catch {
+    return null;
+  }
+}
 
 // Port per line: code.lineSettings.<line>.plcPort if set, else 5000 + the line's number
 // (Line14 -> 5014).
@@ -698,31 +712,45 @@ ipcMain.handle("plc:status", async (_evt, { lineName } = {}) => {
   const port = getPlcPort(lineKey);
   const res = await sendPlcBridgeCommand(port, "STATUS", PLC_STATUS_TIMEOUT_MS);
   if (!res.ok) return { ...unreachablePlcResult(lineKey, res), port };
-  if (res.reply === "READY") return { ok: true, state: "ready", port };
-  if (res.reply === "DISABLED") return { ok: true, state: "disabled", port };
-  if (res.reply === "NOT_CONNECTED") return { ok: true, state: "offline", port };
-  return { ok: false, state: "error", port, message: res.reply };
+  const data = parseBridgeReply(res.reply);
+  const state = PLC_STATE_BY_BRIDGE[data?.plc];
+  if (!state) return { ok: false, state: "error", port, message: `Unexpected bridge reply: ${res.reply}` };
+  return {
+    ok: true,
+    state,
+    port,
+    singleDefect: Boolean(data.single_defect),
+    consecutive: Number(data.consecutive) || null,
+    defaultConsecutive: Number(data.default) || null
+  };
 });
 
-ipcMain.handle("plc:send", async (_evt, { lineName } = {}) => {
+ipcMain.handle("plc:set-single-defect", async (_evt, { lineName, enabled } = {}) => {
   const lineKey = getLineProcessKey(lineName);
   if (plcBusyLines.has(lineKey)) {
-    return { ok: false, state: "busy", message: `A PLC signal is already being sent for ${lineKey}.` };
+    return { ok: false, state: "busy", message: `A change is already in progress for ${lineKey}.` };
   }
   plcBusyLines.add(lineKey);
   try {
     const port = getPlcPort(lineKey);
-    const res = await sendPlcBridgeCommand(port, "SEND_SIGNAL", PLC_SEND_TIMEOUT_MS);
+    const command = `SINGLE_DEFECT ${enabled ? "ON" : "OFF"}`;
+    const res = await sendPlcBridgeCommand(port, command, PLC_SET_TIMEOUT_MS);
     if (!res.ok) return unreachablePlcResult(lineKey, res);
-    if (res.reply === "OK") return { ok: true, state: "sent", message: `PLC signal sent for ${lineKey}.` };
-    if (res.reply === "DISABLED") {
-      return { ok: false, state: "disabled", message: `PLC is not enabled for the running SKU on ${lineKey}.` };
+    const data = parseBridgeReply(res.reply);
+    if (!data) return { ok: false, state: "error", message: `Unexpected bridge reply: ${res.reply}` };
+    if (!data.ok) {
+      return { ok: false, state: "error", message: data.error || `Could not change ${lineKey}.` };
     }
-    if (res.reply === "NOT_CONNECTED") {
-      return { ok: false, state: "offline", message: `PLC on ${lineKey} is not connected. Signal was not sent.` };
-    }
-    const errorText = res.reply.replace(/^ERR\s*/, "") || "Unknown error";
-    return { ok: false, state: "error", message: `PLC signal failed: ${errorText}` };
+    const singleDefect = Boolean(data.single_defect);
+    const consecutive = Number(data.consecutive) || null;
+    return {
+      ok: true,
+      singleDefect,
+      consecutive,
+      message: singleDefect
+        ? `${lineKey}: rejecting on every single defect.`
+        : `${lineKey}: rejecting after ${consecutive ?? "the configured number of"} consecutive defects.`
+    };
   } finally {
     plcBusyLines.delete(lineKey);
   }

@@ -300,6 +300,12 @@ a:hover {
   transform: translateX(24px);
 }
 
+.iv-switch:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .iv-btn,
   .iv-field,

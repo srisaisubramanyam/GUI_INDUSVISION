@@ -6,28 +6,15 @@ import Select from "../components/Select.jsx";
 import Modal from "../components/Modal.jsx";
 import { useToast } from "../components/useToast.jsx";
 import { useElectronAPI } from "../utils/electronAPI.js";
-import {
-  ChevronDown,
-  ChevronRight,
-  CircleCheck,
-  CircleX,
-  LoaderCircle,
-  Play,
-  Plus,
-  Square,
-  Trash2,
-  Wrench,
-  Zap
-} from "lucide-react";
+import { ChevronDown, ChevronRight, Play, Plus, Square, Trash2, Wrench } from "lucide-react";
 
 const isDev = () => localStorage.getItem("role") === "developer";
 const SCRIPT_PATH_EXAMPLE = "C:/Users/Rupesh/dummypythonfiles/infinite_counter.py";
 const SUPPORTED_SCRIPT_EXTENSIONS = [".py", ".bat", ".cmd"];
 const DEFAULT_STOP_COOLDOWN_MS = 20 * 1000;
 const PLC_STATUS_POLL_MS = 3000;
-const PLC_RESULT_DISPLAY_MS = 2000;
-// bridge states that mean "pressing now cannot work", reported as info rather than error
-const PLC_UNAVAILABLE_STATES = ["disabled", "offline", "starting", "not_running"];
+// bridge states that mean "changing it now cannot work", reported as info rather than error
+const PLC_UNAVAILABLE_STATES = ["disabled", "starting", "not_running"];
 const createEmptyOcrGroup = (name = "") => ({
   name,
   fields: [{ key: "", value: "" }]
@@ -150,12 +137,12 @@ export default function Code() {
   const [lineCooldowns, setLineCooldowns] = useState({});
   const [stopCooldownMs, setStopCooldownMs] = useState(DEFAULT_STOP_COOLDOWN_MS);
   const [countdownNow, setCountdownNow] = useState(Date.now());
-  // per line: bridge state from STATUS polling
-  // (ready | disabled | offline | starting | not_running | timeout | error)
+  // per line, from STATUS polling of the running script's PLC bridge:
+  // { state: ready | disabled | offline | starting | not_running | timeout | error,
+  //   singleDefect, consecutive, defaultConsecutive }
   const [plcStatus, setPlcStatus] = useState({});
-  // per line: in-flight / last result of a Send Signal press (sending | sent | failed)
-  const [plcAction, setPlcAction] = useState({});
-  const plcResetTimersRef = useRef({});
+  // per line: true while a Single Defect Reject change is being applied
+  const [plcSaving, setPlcSaving] = useState({});
 
   const [openSku, setOpenSku] = useState(false);
   const [openLine, setOpenLine] = useState(false);
@@ -358,17 +345,22 @@ export default function Code() {
           runningKeys.map(async (key) => {
             try {
               const res = await api.getPlcStatus({ lineName: key });
-              return [key, res?.state || "error"];
+              return [key, {
+                state: res?.state || "error",
+                singleDefect: Boolean(res?.singleDefect),
+                consecutive: res?.consecutive ?? null,
+                defaultConsecutive: res?.defaultConsecutive ?? null
+              }];
             } catch {
-              return [key, "error"];
+              return [key, { state: "error" }];
             }
           })
         );
         if (cancelled) return;
         setPlcStatus((prev) => {
           const next = { ...prev };
-          results.forEach(([key, state]) => {
-            next[key] = state;
+          results.forEach(([key, status]) => {
+            next[key] = status;
           });
           return next;
         });
@@ -387,83 +379,59 @@ export default function Code() {
     };
   }, [runningLinesSignature]);
 
-  useEffect(() => {
-    const timers = plcResetTimersRef.current;
-    return () => Object.values(timers).forEach((t) => window.clearTimeout(t));
-  }, []);
-
-  async function sendPlcSignal(lineName) {
-    if (plcAction[lineName]) return;
-    window.clearTimeout(plcResetTimersRef.current[lineName]);
-    setPlcAction((prev) => ({ ...prev, [lineName]: "sending" }));
-
-    let result = "failed";
+  async function toggleSingleDefectReject(lineName) {
+    if (plcSaving[lineName]) return;
+    const enabled = !plcStatus[lineName]?.singleDefect;
+    setPlcSaving((prev) => ({ ...prev, [lineName]: true }));
     try {
       const api = await useElectronAPI();
-      const res = await api.sendPlcSignal({ lineName });
+      const res = await api.setSingleDefectReject({ lineName, enabled });
       if (res?.ok) {
-        result = "sent";
-        toast.push("success", res.message || `PLC signal sent for ${lineName}`);
+        setPlcStatus((prev) => ({
+          ...prev,
+          [lineName]: { ...prev[lineName], singleDefect: res.singleDefect, consecutive: res.consecutive }
+        }));
+        toast.push("success", res.message);
       } else if (PLC_UNAVAILABLE_STATES.includes(res?.state)) {
-        setPlcStatus((prev) => ({ ...prev, [lineName]: res.state }));
+        setPlcStatus((prev) => ({ ...prev, [lineName]: { ...prev[lineName], state: res.state } }));
         toast.push("info", res.message);
       } else {
-        toast.push("error", res?.message || "Failed to send PLC signal");
+        toast.push("error", res?.message || "Failed to change Single Defect Reject");
       }
     } catch (e) {
-      toast.push("error", e?.message || "Failed to send PLC signal");
-    }
-
-    // show the result briefly, then make the button available again
-    setPlcAction((prev) => ({ ...prev, [lineName]: result }));
-    plcResetTimersRef.current[lineName] = window.setTimeout(() => {
-      setPlcAction((prev) => {
+      toast.push("error", e?.message || "Failed to change Single Defect Reject");
+    } finally {
+      setPlcSaving((prev) => {
         const next = { ...prev };
         delete next[lineName];
         return next;
       });
-      delete plcResetTimersRef.current[lineName];
-    }, PLC_RESULT_DISPLAY_MS);
+    }
   }
 
-  function getPlcButtonView(lineKey) {
-    const action = plcAction[lineKey];
-    if (action === "sending") {
-      return { icon: <LoaderCircle size={16} className="animate-spin" />, text: "Sending...", disabled: true };
-    }
-    if (action === "sent") {
-      return { icon: <CircleCheck size={16} />, text: "Signal sent", disabled: true };
-    }
-    if (action === "failed") {
-      return { icon: <CircleX size={16} />, text: "Signal failed", disabled: true };
-    }
+  // Single Defect Reject: ON -> reject on every defect (consecutive = 1),
+  // OFF -> reject after the SKU's configured consecutive defects (e.g. 3).
+  function getSingleDefectView(lineKey) {
+    const status = plcStatus[lineKey] || {};
+    const on = Boolean(status.singleDefect);
+    const base = { on, disabled: true };
 
-    const idle = { icon: <Zap size={16} />, text: "Send Signal to PLC" };
-    if (!lineRunning[lineKey]) {
-      return { ...idle, disabled: true, title: "Run a SKU on this line first" };
+    if (!lineRunning[lineKey]) return { ...base, on: false, hint: "Run a SKU on this line first" };
+    if (!status.state || status.state === "starting" || status.state === "not_running") {
+      return { ...base, on: false, hint: "Waiting for the SKU to start..." };
     }
-    const status = plcStatus[lineKey];
-    if (status === "disabled") {
-      return { ...idle, text: "PLC disabled", disabled: true, title: "enable_plc is false for the running SKU" };
+    if (status.state === "disabled") return { ...base, on: false, hint: "PLC disabled for this SKU" };
+    if (status.state === "timeout" || status.state === "error") {
+      return { ...base, hint: "No reply from the SKU script" };
     }
-    if (status === "offline") {
-      return {
-        icon: <CircleX size={16} />,
-        text: "PLC offline",
-        disabled: true,
-        title: "The SKU script cannot reach the PLC. The button re-enables once it reconnects."
-      };
-    }
-    if (!status || status === "starting" || status === "not_running") {
-      return {
-        icon: <LoaderCircle size={16} className="animate-spin" />,
-        text: "PLC starting...",
-        disabled: true,
-        title: "Waiting for the SKU script to finish starting (camera + PLC)"
-      };
-    }
-    // ready, or a transient timeout/error: let the operator try
-    return { ...idle, disabled: false, title: `Send a signal to the PLC on ${lineKey}` };
+    if (plcSaving[lineKey]) return { ...base, hint: "Updating..." };
+
+    const offCount = status.defaultConsecutive ?? status.consecutive;
+    const rule = on
+      ? "ON - reject on every defect"
+      : `OFF - reject after ${offCount ?? "consecutive"} defects in a row`;
+    const offline = status.state === "offline" ? " (PLC offline)" : "";
+    return { on, disabled: false, hint: `${rule}${offline}` };
   }
 
   function getList(lineKey) {
@@ -869,16 +837,28 @@ export default function Code() {
 
                 <div className="mt-4 grid gap-3 sm:grid-cols-2">
                   {(() => {
-                    const plcView = getPlcButtonView(lineKey);
+                    const view = getSingleDefectView(lineKey);
                     return (
-                      <Button
-                        className="w-full"
-                        onClick={() => sendPlcSignal(lineKey)}
-                        disabled={plcView.disabled}
-                        title={plcView.title}
+                      <div
+                        className={`flex items-center justify-between gap-3 rounded-[22px] border border-[color:var(--border)] bg-[rgba(255,249,242,0.85)] px-5 py-2 ${view.disabled ? "opacity-70" : ""}`}
                       >
-                        {plcView.icon} {plcView.text}
-                      </Button>
+                        <div className="min-w-0">
+                          <div className="text-sm font-bold text-[color:var(--text)]">Single Defect Reject</div>
+                          <div className="truncate text-xs text-[color:var(--muted)]">{view.hint}</div>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={view.on}
+                          aria-label={`Single Defect Reject for ${lineKey}`}
+                          className={`iv-switch shrink-0 ${view.on ? "iv-switch--on" : ""}`}
+                          onClick={() => toggleSingleDefectReject(lineKey)}
+                          disabled={view.disabled}
+                          title={view.hint}
+                        >
+                          <span className="iv-switch-thumb" />
+                        </button>
+                      </div>
                     );
                   })()}
                   <Button

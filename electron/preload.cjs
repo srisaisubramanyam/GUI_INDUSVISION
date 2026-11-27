@@ -15,7 +15,7 @@ contextBridge.exposeInMainWorld("api", {
   stopPython: (payload) => ipcRenderer.invoke("run:stop", payload),
   getRunState: () => ipcRenderer.invoke("run:get-state"),
   getPlcStatus: (payload) => ipcRenderer.invoke("plc:status", payload),
-  sendPlcSignal: (payload) => ipcRenderer.invoke("plc:send", payload),
+  setSingleDefectReject: (payload) => ipcRenderer.invoke("plc:set-single-defect", payload),
   onRunState: (cb) => {
     const handler = (_event, payload) => cb(payload);
     ipcRenderer.on("run:state", handler);

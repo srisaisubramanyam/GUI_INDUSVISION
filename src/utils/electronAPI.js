@@ -25,7 +25,7 @@ export async function useElectronAPI() {
     stopPython: (payload) => api.stopPython(payload),
     getRunState: () => api.getRunState(),
     getPlcStatus: (payload) => api.getPlcStatus(payload),
-    sendPlcSignal: (payload) => api.sendPlcSignal(payload),
+    setSingleDefectReject: (payload) => api.setSingleDefectReject(payload),
     onRunState: (cb) => api.onRunState(cb)
   };
 }
