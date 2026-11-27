@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog } = require("electron");
 const fs = require("fs");
 const path = require("path");
+const net = require("net");
 const { spawn, spawnSync } = require("child_process");
 const { readConfig, writeConfig } = require("./configStore.cjs");
 const { updateOcrConfig } = require("./ocrConfigWriter.cjs");
@@ -20,6 +21,68 @@ const runningLinePollers = new Map();
 const lineCooldownDeadlines = new Map();
 const lineCooldownTimeouts = new Map();
 const STOP_COOLDOWN_MS = 20 * 1000;
+
+// ---- PLC bridge -----------------------------------------------------------
+// The running SKU script (OCR child process) listens on 127.0.0.1:<port> and
+// answers one-line commands: STATUS -> READY|DISABLED, SEND_SIGNAL -> OK|DISABLED|ERR <msg>.
+// The port is handed to the script via the PLC_BRIDGE_PORT env var at launch.
+const PLC_BRIDGE_BASE_PORT = 5000;
+const PLC_STATUS_TIMEOUT_MS = 2000;
+const PLC_SEND_TIMEOUT_MS = 8000;
+const plcBusyLines = new Set();
+
+// Port per line: code.lineSettings.<line>.plcPort if set, else 5000 + the line's number
+// (Line14 -> 5014).
+function getPlcPort(lineKey) {
+  try {
+    const override = Number(readConfig()?.code?.lineSettings?.[lineKey]?.plcPort);
+    if (Number.isInteger(override) && override > 0 && override < 65536) return override;
+  } catch {
+    // fall back to the derived port
+  }
+  const digits = String(lineKey || "").match(/\d+/);
+  const lineNumber = digits ? Number(digits[0]) % 1000 : 0;
+  return PLC_BRIDGE_BASE_PORT + lineNumber;
+}
+
+// Sends one command to the bridge and resolves with its one-line reply.
+// Never rejects: connection/timeout problems come back as { ok: false, code }.
+function sendPlcBridgeCommand(port, command, timeoutMs) {
+  return new Promise((resolve) => {
+    let reply = "";
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(result);
+    };
+
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+    socket.setTimeout(timeoutMs);
+    socket.on("connect", () => socket.write(`${command}\n`));
+    socket.on("data", (buf) => {
+      reply += String(buf);
+      if (reply.includes("\n")) finish({ ok: true, reply: reply.trim() });
+    });
+    socket.on("end", () => finish(reply ? { ok: true, reply: reply.trim() } : { ok: false, code: "EMPTY" }));
+    socket.on("timeout", () => finish({ ok: false, code: "TIMEOUT" }));
+    socket.on("error", (err) => finish({ ok: false, code: err?.code || "ERROR", message: err?.message }));
+  });
+}
+
+// Bridge unreachable: the line is either stopped, or its script is still starting
+// (the bridge only opens after the camera and PLC workers are up).
+function unreachablePlcResult(lineKey, res) {
+  if (res.code === "TIMEOUT") {
+    return { ok: false, state: "timeout", message: `No reply from ${lineKey} PLC bridge (timeout).` };
+  }
+  if (runningLineProcesses.get(lineKey)) {
+    return { ok: false, state: "starting", message: `${lineKey} is still starting. Try again in a few seconds.` };
+  }
+  return { ok: false, state: "not_running", message: `No SKU is running on ${lineKey}.` };
+}
+
 function broadcastRunState(payload) {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send("run:state", payload);
@@ -546,7 +609,9 @@ async function startLineScript({ scriptPath, args = [], lineName, ocrConfig, sku
     ], {
       windowsHide: true,
       shell: false,
-      stdio: ["ignore", "pipe", "pipe"]
+      stdio: ["ignore", "pipe", "pipe"],
+      // inherited by Start-Process -> cmd.exe -> python and its child processes
+      env: { ...process.env, PLC_BRIDGE_PORT: String(getPlcPort(lineKey)) }
     });
 
     const pid = await new Promise((resolve, reject) => {
@@ -625,6 +690,37 @@ ipcMain.handle("run:stop", async (_evt, { lineName }) => {
   }
 
   return { ok: false, stopped: false, message: "Failed to stop terminal process." };
+});
+
+ipcMain.handle("plc:status", async (_evt, { lineName } = {}) => {
+  const lineKey = getLineProcessKey(lineName);
+  const port = getPlcPort(lineKey);
+  const res = await sendPlcBridgeCommand(port, "STATUS", PLC_STATUS_TIMEOUT_MS);
+  if (!res.ok) return { ...unreachablePlcResult(lineKey, res), port };
+  if (res.reply === "READY") return { ok: true, state: "ready", port };
+  if (res.reply === "DISABLED") return { ok: true, state: "disabled", port };
+  return { ok: false, state: "error", port, message: res.reply };
+});
+
+ipcMain.handle("plc:send", async (_evt, { lineName } = {}) => {
+  const lineKey = getLineProcessKey(lineName);
+  if (plcBusyLines.has(lineKey)) {
+    return { ok: false, state: "busy", message: `A PLC signal is already being sent for ${lineKey}.` };
+  }
+  plcBusyLines.add(lineKey);
+  try {
+    const port = getPlcPort(lineKey);
+    const res = await sendPlcBridgeCommand(port, "SEND_SIGNAL", PLC_SEND_TIMEOUT_MS);
+    if (!res.ok) return unreachablePlcResult(lineKey, res);
+    if (res.reply === "OK") return { ok: true, state: "sent", message: `PLC signal sent for ${lineKey}.` };
+    if (res.reply === "DISABLED") {
+      return { ok: false, state: "disabled", message: `PLC is not enabled for the running SKU on ${lineKey}.` };
+    }
+    const errorText = res.reply.replace(/^ERR\s*/, "") || "Unknown error";
+    return { ok: false, state: "error", message: `PLC signal failed: ${errorText}` };
+  } finally {
+    plcBusyLines.delete(lineKey);
+  }
 });
 
 ipcMain.handle("run:get-state", async () => {

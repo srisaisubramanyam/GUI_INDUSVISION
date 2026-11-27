@@ -24,6 +24,8 @@ export async function useElectronAPI() {
     runPython: (payload) => api.runPython(payload),
     stopPython: (payload) => api.stopPython(payload),
     getRunState: () => api.getRunState(),
+    getPlcStatus: (payload) => api.getPlcStatus(payload),
+    sendPlcSignal: (payload) => api.sendPlcSignal(payload),
     onRunState: (cb) => api.onRunState(cb)
   };
 }

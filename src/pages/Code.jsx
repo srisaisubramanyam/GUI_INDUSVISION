@@ -6,12 +6,28 @@ import Select from "../components/Select.jsx";
 import Modal from "../components/Modal.jsx";
 import { useToast } from "../components/useToast.jsx";
 import { useElectronAPI } from "../utils/electronAPI.js";
-import { ChevronDown, ChevronRight, Play, Plus, Square, Trash2, Wrench } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  CircleCheck,
+  CircleX,
+  LoaderCircle,
+  Play,
+  Plus,
+  Square,
+  Trash2,
+  Wrench,
+  Zap
+} from "lucide-react";
 
 const isDev = () => localStorage.getItem("role") === "developer";
 const SCRIPT_PATH_EXAMPLE = "C:/Users/Rupesh/dummypythonfiles/infinite_counter.py";
 const SUPPORTED_SCRIPT_EXTENSIONS = [".py", ".bat", ".cmd"];
 const DEFAULT_STOP_COOLDOWN_MS = 20 * 1000;
+const PLC_STATUS_POLL_MS = 3000;
+const PLC_RESULT_DISPLAY_MS = 2000;
+// bridge states that mean "pressing now cannot work", reported as info rather than error
+const PLC_UNAVAILABLE_STATES = ["disabled", "starting", "not_running"];
 const createEmptyOcrGroup = (name = "") => ({
   name,
   fields: [{ key: "", value: "" }]
@@ -134,6 +150,11 @@ export default function Code() {
   const [lineCooldowns, setLineCooldowns] = useState({});
   const [stopCooldownMs, setStopCooldownMs] = useState(DEFAULT_STOP_COOLDOWN_MS);
   const [countdownNow, setCountdownNow] = useState(Date.now());
+  // per line: bridge state from STATUS polling (ready | disabled | starting | not_running | timeout | error)
+  const [plcStatus, setPlcStatus] = useState({});
+  // per line: in-flight / last result of a Send Signal press (sending | sent | failed)
+  const [plcAction, setPlcAction] = useState({});
+  const plcResetTimersRef = useRef({});
 
   const [openSku, setOpenSku] = useState(false);
   const [openLine, setOpenLine] = useState(false);
@@ -306,6 +327,135 @@ export default function Code() {
 
     return () => window.clearInterval(timer);
   }, []);
+
+  // Poll the PLC bridge of every running line, so the button knows whether the
+  // script is still starting, has PLC disabled, or is ready to take a signal.
+  const runningLinesSignature = Object.keys(lineRunning)
+    .filter((key) => lineRunning[key])
+    .sort()
+    .join("|");
+
+  useEffect(() => {
+    const runningKeys = runningLinesSignature ? runningLinesSignature.split("|") : [];
+    setPlcStatus((prev) => {
+      const next = {};
+      runningKeys.forEach((key) => {
+        if (prev[key]) next[key] = prev[key];
+      });
+      return next;
+    });
+    if (runningKeys.length === 0) return undefined;
+
+    let cancelled = false;
+    let inFlight = false;
+    const poll = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const api = await useElectronAPI();
+        const results = await Promise.all(
+          runningKeys.map(async (key) => {
+            try {
+              const res = await api.getPlcStatus({ lineName: key });
+              return [key, res?.state || "error"];
+            } catch {
+              return [key, "error"];
+            }
+          })
+        );
+        if (cancelled) return;
+        setPlcStatus((prev) => {
+          const next = { ...prev };
+          results.forEach(([key, state]) => {
+            next[key] = state;
+          });
+          return next;
+        });
+      } catch {
+        // non-electron environment
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    poll();
+    const timer = window.setInterval(poll, PLC_STATUS_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [runningLinesSignature]);
+
+  useEffect(() => {
+    const timers = plcResetTimersRef.current;
+    return () => Object.values(timers).forEach((t) => window.clearTimeout(t));
+  }, []);
+
+  async function sendPlcSignal(lineName) {
+    if (plcAction[lineName]) return;
+    window.clearTimeout(plcResetTimersRef.current[lineName]);
+    setPlcAction((prev) => ({ ...prev, [lineName]: "sending" }));
+
+    let result = "failed";
+    try {
+      const api = await useElectronAPI();
+      const res = await api.sendPlcSignal({ lineName });
+      if (res?.ok) {
+        result = "sent";
+        toast.push("success", res.message || `PLC signal sent for ${lineName}`);
+      } else if (PLC_UNAVAILABLE_STATES.includes(res?.state)) {
+        setPlcStatus((prev) => ({ ...prev, [lineName]: res.state }));
+        toast.push("info", res.message);
+      } else {
+        toast.push("error", res?.message || "Failed to send PLC signal");
+      }
+    } catch (e) {
+      toast.push("error", e?.message || "Failed to send PLC signal");
+    }
+
+    // show the result briefly, then make the button available again
+    setPlcAction((prev) => ({ ...prev, [lineName]: result }));
+    plcResetTimersRef.current[lineName] = window.setTimeout(() => {
+      setPlcAction((prev) => {
+        const next = { ...prev };
+        delete next[lineName];
+        return next;
+      });
+      delete plcResetTimersRef.current[lineName];
+    }, PLC_RESULT_DISPLAY_MS);
+  }
+
+  function getPlcButtonView(lineKey) {
+    const action = plcAction[lineKey];
+    if (action === "sending") {
+      return { icon: <LoaderCircle size={16} className="animate-spin" />, text: "Sending...", disabled: true };
+    }
+    if (action === "sent") {
+      return { icon: <CircleCheck size={16} />, text: "Signal sent", disabled: true };
+    }
+    if (action === "failed") {
+      return { icon: <CircleX size={16} />, text: "Signal failed", disabled: true };
+    }
+
+    const idle = { icon: <Zap size={16} />, text: "Send Signal to PLC" };
+    if (!lineRunning[lineKey]) {
+      return { ...idle, disabled: true, title: "Run a SKU on this line first" };
+    }
+    const status = plcStatus[lineKey];
+    if (status === "disabled") {
+      return { ...idle, text: "PLC disabled", disabled: true, title: "enable_plc is false for the running SKU" };
+    }
+    if (!status || status === "starting" || status === "not_running") {
+      return {
+        icon: <LoaderCircle size={16} className="animate-spin" />,
+        text: "PLC starting...",
+        disabled: true,
+        title: "Waiting for the SKU script to finish starting (camera + PLC)"
+      };
+    }
+    // ready, or a transient timeout/error: let the operator try
+    return { ...idle, disabled: false, title: `Send a signal to the PLC on ${lineKey}` };
+  }
 
   function getList(lineKey) {
     return cfg?.code?.lines?.[lineKey] || [];
@@ -708,7 +858,20 @@ export default function Code() {
                   <div className="text-sm text-[color:var(--muted)]">No SKUs configured.</div>
                 )}
 
-                <div className="mt-4">
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  {(() => {
+                    const plcView = getPlcButtonView(lineKey);
+                    return (
+                      <Button
+                        className="w-full"
+                        onClick={() => sendPlcSignal(lineKey)}
+                        disabled={plcView.disabled}
+                        title={plcView.title}
+                      >
+                        {plcView.icon} {plcView.text}
+                      </Button>
+                    );
+                  })()}
                   <Button
                     variant="danger"
                     className="w-full"
